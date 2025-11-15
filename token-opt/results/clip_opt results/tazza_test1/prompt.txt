@@ -1,3 +1,0 @@
-"a photo of a cartoon cup",
-    "a photo of a cup filled with tea",
-    "a photo of 2 same cups"

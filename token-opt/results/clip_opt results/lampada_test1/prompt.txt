@@ -1,4 +1,0 @@
-    "a photo of a lamp whth another lamp on the right",
-    "a photo of a white lamp",
-    "a photo of a smaller lamp",
-    "a photo of a lamp with neutral background",
