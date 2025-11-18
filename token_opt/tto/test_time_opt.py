@@ -180,9 +180,9 @@ class TestTimeOpt(nn.Module):
                 )):
                     break
         with ema.average_parameters(), torch.no_grad():
-            return (torch.clamp(
+            return torch.clamp(
                 self.decode(opt_tokens), 0.0, 1.0
-            ),loss)
+            )
 
 
 class AugmentationHelper:

@@ -2,6 +2,7 @@ import enum
 from pathlib import Path
 import json
 import torch
+from sympy import Tuple
 from torch import Tensor,nn
 import numpy as np
 import torchvision.transforms.v2.functional as tvf
@@ -121,7 +122,7 @@ class TTOTester:
         self.is_inpaiting=self.tto.config.is_inpaiting
 
     def start_test(self,objects_to_test:list[str],images_types:list[str],dataset_path:Path,json_filename:str,output_path:Path):
-        json_path=dataset_path/Path(json_filename) #es DATASET/inpaiting/testing1.json, informa il path del file json
+        json_path=dataset_path/Path(json_filename) #es DATASET/inpaiting/dataset_inpaiting.json, informa il path del file json
         json_output={"images_types":[],
                      "config": self.tto.get_json_configuration(),
                      } #dizionario che conterra' i risultati dei test
@@ -200,12 +201,12 @@ class TTOTester:
                     # not inpainting
                     seed = orig_tns
                     # eseguo il test
-                    test_results: list[(Tensor, float, str, Tensor)] = self._execute_test(seed,
+                    test_results: list[tuple[Tensor, float, str, Tensor]] = self._execute_test(seed,
                                                                                           prompts)
                 out_tests = []
                 prompt_number = 1
                 # salvo i risultati del singolo test
-                for result_img_tensor, loss, prompt, seed in test_results:
+                for result_img_tensor, clip_score, prompt, seed in test_results:
 
                     result_img = tensor_to_image(result_img_tensor)  # converto il tensore risultato in immagine
                     seed_img = tensor_to_image(
@@ -215,13 +216,13 @@ class TTOTester:
                         left_img=seed_img,
                         right_img=result_img,
                         prompt=prompt,
-                        value=loss,
+                        value=clip_score,
                         out_path=result_dir_path / Path(f"prompt_{prompt_number}.png"),
                     )
                     out_single_test_json = {
                         "prompt_number": prompt_number,
                         "prompt": prompt,
-                        "loss": loss,
+                        "clip_score": clip_score,
                         "result_path": str(
                             result_dir_path / Path(f"prompt_{prompt_number}.png")
                         ),
@@ -248,19 +249,44 @@ class TTOTester:
             }
             output_cases.append(output_case)
         return output_cases
-    def _execute_test(self, seed: Tensor, prompts: list[str], mask: Tensor=None) -> list[(Tensor, float, str, Tensor)]:
+
+    def _execute_test(self, seed: Tensor, prompts: list[str], mask: Tensor=None) -> list[tuple[Tensor, float, str, Tensor]]:
          results_combined=[]
          for prompt in prompts:
             # Impostiamo gli objective e lanciamo il TTO reale
             try:
                 self.tto.set_objective(seed, prompt, mask)
-                result, loss = self.tto.run(seed, mask)
+                result = self.tto.run(seed, mask)
+                result=seed
+                if mask is not None:
+                    # se la mask ha un solo canale, espandila sui 3 canali dell'immagine
+                    if mask.shape[1] == 1 and result.shape[1] == 3:
+                        mask_eval = mask.expand_as(result)
+                    else:
+                        mask_eval = mask
+
+                    result = result * (1 - mask_eval) + seed * mask_eval  # ricomponiamo l'immagine finale con il seed nelle aree mascherate
+                similarity=self.evaluate_image_similarity(result,prompt)
             except Exception as e:
                 # se fallisce l'esecuzione, includiamo comunque un placeholder nel risultato
                 # e rialziamo l'eccezione dopo aver liberato risorse (la run già pulisce internamente)
                 raise
-            results_combined.append((result, loss, prompt, seed))
+            results_combined.append((result, similarity, prompt, seed))
          return results_combined
+
+    def evaluate_image_similarity(self, img:Tensor,prompt:str)->float:
+        # 3) costruisci il CLIPObjective per la valutazione
+        image_evaluator = CLIPObjective(
+            prompt=prompt,
+            cfg_scale=1.0,
+            num_augmentations=1
+        ).to(self.tto.device).eval()
+
+        with torch.no_grad():
+            loss = image_evaluator(img.to(self.tto.device))  # shape [B]
+            loss = loss.mean()  # scalare
+            clip_score = (-loss).item()  # CLIPScore vero: similarity img_final vs prompt
+        return clip_score
 
 
 
@@ -289,6 +315,9 @@ class Config:
     is_inpaiting:bool
     seed_original:bool=False #se True si passa l'immagine originale al tto, altrimenti immagine mascherata
     objective_seed_original:bool=False #se True si passa l'immagine originale al CLIPObjective, altrimenti immagine mascherata
+    enable_token_reset=True
+    reset_period=5 if enable_token_reset else None
+
 
 class ObjectiveType(enum.Enum):
     ReconstructionObjective=1
@@ -370,22 +399,30 @@ class TTOExecuter:
         if self.config.is_inpaiting: #se siamo in inpaiting
             if mask is None: #DEVE esserci una maschera in caso di inpaiting
                 raise ValueError("Mask is required for inpainting")
+            mask = mask.to(self.device)
             tto_input= seed if self.config.seed_original else seed*mask #immagine originale o mascherata a seconda del flag
         else:  # not in inpaiting
             tto_input=seed #immagine originale
 
-        # Per risparmiare VRAM fino al momento dell'esecuzione spostiamo il tensore su device solo ora
-        if mask is not None:
-            mask = mask.to(self.device)
-
         tto = TestTimeOpt(
             config=self.config.tto_config,
-            objective=self.objective
-        ).to(self.device) # creo il TestTimeOpt con la config e l'objective
+            objective=self.objective,
 
+        ).to(self.device) # creo il TestTimeOpt con la config e l'objective
+        token_reset=None
+        if self.config.is_inpaiting:
+            if self.config.enable_token_reset:
+                token_reset = TokenResetter(
+                    titok=tto.titok,
+                    masked_img=seed * mask,
+                    mask=mask,
+                    reset_period=self.config.reset_period
+                )
         # Eseguiamo il TTO proteggendo la pulizia: in caso di eccezione ripuliamo e rilanciamo
         try:
-            result_img, loss = tto(tto_input)
+            result_img, loss = tto(
+                seed=tto_input,
+                token_reset_callback=token_reset,)
         except Exception:
             try:
                 del tto
@@ -502,58 +539,21 @@ class ComposedCLIP(nn.Module):
         return self.base(composed)
 #endregion
 
+class TokenResetter:
+    def __init__(self, titok, masked_img, mask, reset_period=5):
+        self.titok = titok
+        self.masked_img = masked_img
+        self.mask = mask
+        self.reset_period = reset_period
+
+    @torch.no_grad()
+    def __call__(self, info):
+        if info.i % self.reset_period != 0:
+            return
+        dec_reset = (1. - self.mask) * info.img + self.masked_img
+        return self.titok.encoder(dec_reset, self.titok.latent_tokens)
 
 #----------Example of usage----------
 
-# Global device: prefer CUDA if available
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-
-is_inpaiting=True
-img_types=["clean"] # Options: "clean","real"
-objects=["cup","table","vase","lamp"] # Options: fill with the objects you want to test
-
-json_file="testing1.json" #DEVE STARE DENTRO dataset_path
-dataset_pth=Path(f"../DATASET/{'inpaiting' if is_inpaiting else 'not_inpaiting'}")
-out_pth=Path(f"../output/{'inpaiting' if is_inpaiting else 'not_inpaiting'}")
-
-
-tto_config=TestTimeOptConfig(
-    num_iter=351,
-    ema_decay=0.98,
-    lr=1e-1,
-    enable_amp=True,
-    reg_type="seed",
-    reg_weight=0.05,
-    token_noise=2e-4,
-    vae_deterministic_sampling=True
-    )
-conf1=Config(
-    tto_config=tto_config,
-    objective_weights=[0.5,0.5],
-    cfg_scale=1.2,
-    num_augmentations=8,
-    is_inpaiting=is_inpaiting,
-    seed_original=False,
-    objective_seed_original=False
-
-)
-objective_types=[ObjectiveType.ReconstructionObjective,ObjectiveType.CLIPObjective]
-
-tto_ex=TTOExecuter(
-    config=conf1,
-    objectives_type=objective_types,
-    device=DEVICE
-)
-
-tester=TTOTester(
-    tto=tto_ex, #inserire qui l'oggetto TTOExecuter opportuno
-)
-tester.start_test(
-    objects_to_test=objects,
-    images_types=img_types,
-    dataset_path=dataset_pth,
-    json_filename=json_file,
-    output_path=out_pth
-)
 
