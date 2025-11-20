@@ -2,7 +2,6 @@ import enum
 from pathlib import Path
 import json
 import torch
-from sympy import Tuple
 from torch import Tensor,nn
 import numpy as np
 import torchvision.transforms.v2.functional as tvf
@@ -184,7 +183,7 @@ class TTOTester:
 
                     seed = orig_tns * mask_tns  # immagine mascherata (tensori in CPU)
                     # eseguo il test
-                    test_results: list[(Tensor, float, str, Tensor)] = self._execute_test(seed, prompts,
+                    test_results: list[tuple[Tensor, float, str, Tensor]] = self._execute_test(seed, prompts,
                                                                                           mask_tns)
                     # salvo la maschera usata
                     mask = tensor_to_image(mask_tns,True)
@@ -248,21 +247,21 @@ class TTOTester:
             # Impostiamo gli objective e lanciamo il TTO reale
             try:
                 self.tto.set_objective(seed, prompt, mask)
-                result = self.tto.run(seed, mask)
+                result_img = self.tto.run(seed, mask)
                 if mask is not None:
                     # se la mask ha un solo canale, espandila sui 3 canali dell'immagine
-                    if mask.shape[1] == 1 and result.shape[1] == 3:
-                        mask_eval = mask.expand_as(result)
+                    if mask.shape[1] == 1 and result_img.shape[1] == 3:
+                        mask_eval = mask.expand_as(result_img)
                     else:
                         mask_eval = mask
 
-                    result = result * (1 - mask_eval) + seed * mask_eval  # ricomponiamo l'immagine finale con il seed nelle aree mascherate
-                similarity=self.evaluate_image_similarity(result,prompt)
+                    result_img = result_img * (1 - mask_eval) + seed * mask_eval  # ricomponiamo l'immagine finale con il seed nelle aree mascherate
+                similarity=self.evaluate_image_similarity(result_img,prompt)
             except Exception as e:
                 # se fallisce l'esecuzione, includiamo comunque un placeholder nel risultato
                 # e rialziamo l'eccezione dopo aver liberato risorse (la run già pulisce internamente)
                 raise
-            results_combined.append((result, similarity, prompt, seed))
+            results_combined.append((result_img, similarity, prompt, seed))
          return results_combined
 
     def evaluate_image_similarity(self, img:Tensor,prompt:str)->float:
@@ -384,14 +383,19 @@ class TTOExecuter:
         self.objective=MultiObjective(objectives_list, self.config.objective_weights) #creo il MultiObjective con la lista di objective e i pesi corrispondenti
 
 
-    def run(self,seed:Tensor,mask:Tensor=None)->(Tensor,float):
+    def run(self,seed:Tensor,mask:Tensor=None)->Tensor:
         if self.objective is None:
             raise ValueError("Objectives not set. Call set_objective() before run().")
         if self.config.is_inpainting:
             if mask is None:
                 raise ValueError("Mask is required for inpainting")
-            seed.to(self.device)
-            mask.to(self.device)
+            # Spostiamo seed e mask sul device di esecuzione (GPU/CPU) qui, con assegnamento
+            # in modo che tutte le operazioni element-wise successive usino lo stesso device.
+            seed = seed.to(self.device)
+            mask = mask.to(self.device)
+
+            # Costruiamo qui l'input per il TTO (immagine originale o mascherata) una volta che
+            # seed e mask sono sullo stesso device.
             tto_input = seed if self.config.seed_original else seed * mask
         else:
             tto_input = seed.to(self.device)
@@ -402,9 +406,11 @@ class TTOExecuter:
         token_reset = None
         if self.config.is_inpainting:
             if self.config.enable_token_reset:
+                # Creiamo la masked image per il TokenResetter sullo stesso device
+                masked_for_reset = seed * mask
                 token_reset = TokenResetter(
                     titok=tto.titok,
-                    masked_img=seed * mask,
+                    masked_img=masked_for_reset,
                     mask=mask,
                     reset_period=self.config.reset_period
                 )
@@ -539,7 +545,3 @@ class TokenResetter:
             return
         dec_reset = (1. - self.mask) * info.img + self.masked_img
         return self.titok.encoder(dec_reset, self.titok.latent_tokens)
-
-
-
-
