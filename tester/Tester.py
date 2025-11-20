@@ -119,10 +119,10 @@ class TTOTester:
 
     def __init__(self,tto):
         self.tto:TTOExecuter=tto
-        self.is_inpaiting=self.tto.config.is_inpaiting
+        self.is_inpainting=self.tto.config.is_inpainting
 
     def start_test(self,objects_to_test:list[str],images_types:list[str],dataset_path:Path,json_filename:str,output_path:Path):
-        json_path=dataset_path/Path(json_filename) #es DATASET/inpaiting/dataset_inpaiting.json, informa il path del file json
+        json_path=dataset_path/Path(json_filename) #es DATASET/inpainting/dataset_inpainting.json, informa il path del file json
         json_output={"images_types":[],
                      "config": self.tto.get_json_configuration(),
                      } #dizionario che conterra' i risultati dei test
@@ -186,7 +186,7 @@ class TTOTester:
 
                 mask_tns = None
 
-                if self.is_inpaiting:  # se il test è di inpaiting
+                if self.is_inpainting:  # se il test è di inpainting
                     mask_tns = mask_to_tensor(Path(input_file_path) / test[
                         "mask_name"])  # carico la maschera del test in un tensore (deve essere con valori 0 e 1)
 
@@ -210,7 +210,7 @@ class TTOTester:
 
                     result_img = tensor_to_image(result_img_tensor)  # converto il tensore risultato in immagine
                     seed_img = tensor_to_image(
-                        orig_tns * mask_tns if self.is_inpaiting else orig_tns)  # converto il tensore seed in immagine
+                        orig_tns * mask_tns if self.is_inpainting else orig_tns)  # converto il tensore seed in immagine
                     create_side_by_side_with_caption(
                         # creo l'immagine affiancata con didascalia
                         left_img=seed_img,
@@ -234,7 +234,7 @@ class TTOTester:
                 out_tests_case.append(
                     {
                         "test_index": f"test_{test_index}",
-                        "mask_path": str(result_dir_path / Path(test["mask_name"])) if self.is_inpaiting else None,
+                        "mask_path": str(result_dir_path / Path(test["mask_name"])) if self.is_inpainting else None,
                         "tests": out_tests
                     })
                 test_index += 1
@@ -257,7 +257,6 @@ class TTOTester:
             try:
                 self.tto.set_objective(seed, prompt, mask)
                 result = self.tto.run(seed, mask)
-                result=seed
                 if mask is not None:
                     # se la mask ha un solo canale, espandila sui 3 canali dell'immagine
                     if mask.shape[1] == 1 and result.shape[1] == 3:
@@ -292,14 +291,14 @@ class TTOTester:
 
 """
 IMPORTANTE:
-Le possibili combinazioni di objective per inpaiting sono:
+Le possibili combinazioni di objective per inpainting sono:
 - ReconstructionObjective | CLIPObjective
 - ReconstructionObjective | ComposedCLIP
 - ComposedCLIP
 Quindi nei pesi passare sempre prima il peso di reconstruction e poi quello di CLIP/ComposedCLIP, altrimenti
 solo quello di CLIP/ComposedCLIP.
 
-Per not_inpaiting:
+Per not_inpainting:
 - CLIPObjective
 
 
@@ -312,11 +311,11 @@ class Config:
     objective_weights:list[float] #lista di pesi peg li objectives
     cfg_scale:float
     num_augmentations:int
-    is_inpaiting:bool
+    is_inpainting:bool
     seed_original:bool=False #se True si passa l'immagine originale al tto, altrimenti immagine mascherata
     objective_seed_original:bool=False #se True si passa l'immagine originale al CLIPObjective, altrimenti immagine mascherata
-    enable_token_reset=True
-    reset_period=5 if enable_token_reset else None
+    enable_token_reset:bool=True
+    reset_period:int=5 if enable_token_reset else None
 
 
 class ObjectiveType(enum.Enum):
@@ -353,7 +352,7 @@ class TTOExecuter:
     def set_objective(self, seed: Tensor, prompt: str, mask: Tensor):
         objectives_list=[]
         for i,objective_type in enumerate(self.objectives_type): #scorro i tipi di objective che sono stati scelti
-            if objective_type==ObjectiveType.ReconstructionObjective and self.config.is_inpaiting: #se e' un objective di ricostruzione e siamo in inpaiting
+            if objective_type==ObjectiveType.ReconstructionObjective and self.config.is_inpainting: #se e' un objective di ricostruzione e siamo in inpainting
                 if mask is None: #in questo caso DEVE esserci la maschera
                     raise ValueError("ReconstructionObjective requires a mask")
                 masked_img=seed*mask #immagine mascherata
@@ -367,7 +366,7 @@ class TTOExecuter:
                     num_augmentations=self.config.num_augmentations
                 ) #creo la CLIPObjective
                 objectives_list.append(clip_obj)
-            elif objective_type==ObjectiveType.ComposedCLIP and self.config.is_inpaiting: #se e' un objective di ComposedCLIP e siamo in inpaiting
+            elif objective_type==ObjectiveType.ComposedCLIP and self.config.is_inpainting: #se e' un objective di ComposedCLIP e siamo in inpainting
                 base_clip_obj=CLIPObjective(
                     prompt=prompt,
                     neg_prompt="",
@@ -396,12 +395,12 @@ class TTOExecuter:
     def run(self,seed:Tensor,mask:Tensor=None)->(Tensor,float):
         if self.objective is None: #controllo che l'objective sia stato settato
             raise ValueError("Objectives not set. Call set_objective() before run().")
-        if self.config.is_inpaiting: #se siamo in inpaiting
-            if mask is None: #DEVE esserci una maschera in caso di inpaiting
+        if self.config.is_inpainting: #se siamo in inpainting
+            if mask is None: #DEVE esserci una maschera in caso di inpainting
                 raise ValueError("Mask is required for inpainting")
             mask = mask.to(self.device)
             tto_input= seed if self.config.seed_original else seed*mask #immagine originale o mascherata a seconda del flag
-        else:  # not in inpaiting
+        else:  # not in inpainting
             tto_input=seed #immagine originale
 
         tto = TestTimeOpt(
@@ -410,7 +409,7 @@ class TTOExecuter:
 
         ).to(self.device) # creo il TestTimeOpt con la config e l'objective
         token_reset=None
-        if self.config.is_inpaiting:
+        if self.config.is_inpainting:
             if self.config.enable_token_reset:
                 token_reset = TokenResetter(
                     titok=tto.titok,
@@ -458,7 +457,7 @@ class TTOExecuter:
             "objective_weights":self.config.objective_weights,
             "cfg_scale":self.config.cfg_scale,
             "num_augmentations":self.config.num_augmentations,
-            "is_inpaiting":self.config.is_inpaiting,
+            "is_inpainting":self.config.is_inpainting,
             "seed_original":self.config.seed_original,
             "objective_seed_original":self.config.objective_seed_original,
             "objectives_type":[obj_type.name for obj_type in self.objectives_type]
@@ -553,7 +552,6 @@ class TokenResetter:
         dec_reset = (1. - self.mask) * info.img + self.masked_img
         return self.titok.encoder(dec_reset, self.titok.latent_tokens)
 
-#----------Example of usage----------
 
 
 
