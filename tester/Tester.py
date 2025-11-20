@@ -40,7 +40,8 @@ def hard_clear_cuda(names=()):
             pass
 
 
-def _load_rgb_image_as_tensor(image_path: Path, size: int = 256, device = None) -> Tensor:
+
+def image_to_tensor(image_path: Path, size: int = 256, device = None) -> Tensor:
     img = Image.open(image_path).convert("RGB")
     t = (1.0 / 255.0) * torch.from_numpy(np.array(img).astype(np.float32)).permute(2, 0, 1)
     # torchvision v2 expects size as sequence for some overloads; pass [size, size]
@@ -50,15 +51,6 @@ def _load_rgb_image_as_tensor(image_path: Path, size: int = 256, device = None) 
     if device is not None:
         t = t.to(device)
     return t
-
-
-def image_to_tensor(image_path: Path, size: int = 256, device = None) -> Tensor:
-    """
-    Carica immagine RGB e restituisce tensore [1,3,H,W] float in [0,1].
-    Per default (device=None) mantiene il tensore su CPU per risparmiare VRAM;
-    passare device=DEVICE per spostarlo subito su GPU.
-    """
-    return _load_rgb_image_as_tensor(image_path, size=size, device=device)
 
 
 def mask_to_tensor(mask_path: Path, size: int = 256, threshold: float = 0.5, device = None) -> Tensor:
@@ -398,19 +390,11 @@ class TTOExecuter:
         if self.config.is_inpainting:
             if mask is None:
                 raise ValueError("Mask is required for inpainting")
-
-            # Assicuriamoci che seed e mask siano sullo stesso device prima di operazioni element-wise
-            if mask.device != seed.device:
-                mask = mask.to(seed.device)
-
+            seed.to(self.device)
+            mask.to(self.device)
             tto_input = seed if self.config.seed_original else seed * mask
-
-            # Ora spostiamo esplicitamente sul device di esecuzione (GPU/CPU)
-            mask = mask.to(self.device)
-            tto_input = tto_input.to(self.device)
         else:
             tto_input = seed.to(self.device)
-
         tto = TestTimeOpt(
             config=self.config.tto_config,
             objective=self.objective,
@@ -425,7 +409,7 @@ class TTOExecuter:
                     reset_period=self.config.reset_period
                 )
         try:
-            result_img, loss = tto(
+            result_img = tto(
                 seed=tto_input,
                 token_reset_callback=token_reset,)
         except Exception:
@@ -443,7 +427,7 @@ class TTOExecuter:
                 pass
             self.clean_after_test()
             hard_clear_cuda()
-            return result_img.to("cpu"), loss
+            return result_img.to("cpu")
 
     def clean_after_test(self):
         try:
