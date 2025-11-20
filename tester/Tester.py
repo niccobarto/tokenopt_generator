@@ -393,22 +393,29 @@ class TTOExecuter:
 
 
     def run(self,seed:Tensor,mask:Tensor=None)->(Tensor,float):
-        if self.objective is None: #controllo che l'objective sia stato settato
+        if self.objective is None:
             raise ValueError("Objectives not set. Call set_objective() before run().")
-        if self.config.is_inpainting: #se siamo in inpainting
-            if mask is None: #DEVE esserci una maschera in caso di inpainting
+        if self.config.is_inpainting:
+            if mask is None:
                 raise ValueError("Mask is required for inpainting")
+
+            # Assicuriamoci che seed e mask siano sullo stesso device prima di operazioni element-wise
+            if mask.device != seed.device:
+                mask = mask.to(seed.device)
+
+            tto_input = seed if self.config.seed_original else seed * mask
+
+            # Ora spostiamo esplicitamente sul device di esecuzione (GPU/CPU)
             mask = mask.to(self.device)
-            tto_input= seed if self.config.seed_original else seed*mask #immagine originale o mascherata a seconda del flag
-        else:  # not in inpainting
-            tto_input=seed #immagine originale
+            tto_input = tto_input.to(self.device)
+        else:
+            tto_input = seed.to(self.device)
 
         tto = TestTimeOpt(
             config=self.config.tto_config,
             objective=self.objective,
-
-        ).to(self.device) # creo il TestTimeOpt con la config e l'objective
-        token_reset=None
+        ).to(self.device)
+        token_reset = None
         if self.config.is_inpainting:
             if self.config.enable_token_reset:
                 token_reset = TokenResetter(
@@ -417,7 +424,6 @@ class TTOExecuter:
                     mask=mask,
                     reset_period=self.config.reset_period
                 )
-        # Eseguiamo il TTO proteggendo la pulizia: in caso di eccezione ripuliamo e rilanciamo
         try:
             result_img, loss = tto(
                 seed=tto_input,
@@ -427,12 +433,10 @@ class TTOExecuter:
                 del tto
             except Exception:
                 pass
-            # pulizia esplicita degli objectivi e della cache
             self.clean_after_test()
             hard_clear_cuda()
             raise
         else:
-            # successo: puliamo e restituiamo
             try:
                 del tto
             except Exception:
