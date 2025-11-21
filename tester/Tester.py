@@ -127,6 +127,7 @@ class TTOTester:
                 dataset = typ["dataset"] #prendo il dataset associato al tipo di immagine
                 for obj in dataset: #scorro gli oggetti del dataset
                     obj_name=obj["object"]
+                    print(f"###--- Testing object: {obj_name} of type {img_type} ---###")
                     if  obj_name in objects_to_test:
                         output_path_json=self.test_single_object(obj,dataset_path,output_path)
                         out_obj_cases_json={
@@ -148,6 +149,7 @@ class TTOTester:
         output_cases=[]
         for case in cases:  # scorro i casi che un determinato oggetto ha (casi=varianti dell'oggetto in immagini)
             case_name=case["case"]
+            print(" #-- Testing case:",case_name," --#")
             info = case["info"]  # prendo le info associate al caso (
             files_path = info["files_path"]  # path relativo alla directory del caso, es: clean/cup/cup1
             input_file_path = Path(dataset_path) / Path(
@@ -184,6 +186,7 @@ class TTOTester:
 
                     seed = orig_tns * mask_tns  # immagine mascherata (tensori in CPU)
                     # eseguo il test
+                    print(f"-- Executing inpainting test for obj: {obj["object"]} and mask: {test["mask_name"]} --")
                     test_results: list[tuple[Tensor, float, str, Tensor]] = self._execute_test(seed, prompts,
                                                                                           mask_tns)
                     # salvo la maschera usata
@@ -192,6 +195,7 @@ class TTOTester:
                 else:
                     # not inpainting
                     seed = orig_tns
+                    print(f"-- Executing not-inpainting test for obj: {obj["object"]} --")
                     # eseguo il test
                     test_results: list[tuple[Tensor, float, str, Tensor]] = self._execute_test(seed,
                                                                                           prompts)
@@ -211,6 +215,13 @@ class TTOTester:
                         value=clip_score,
                         out_path=result_dir_path / Path(f"prompt_{prompt_number}.png"),
                     )
+
+                    # Salviamo anche l'immagine risultante "non-merged" in una sottocartella results_not_merged
+                    not_merged_dir = result_dir_path / Path("results_not_merged")
+                    not_merged_dir.mkdir(parents=True, exist_ok=True)
+                    # Salviamo l'immagine singola con estensione .png
+                    result_img.save(not_merged_dir / Path(f"prompt_{prompt_number}.png"))
+
                     out_single_test_json = {
                         "prompt_number": prompt_number,
                         "prompt": prompt,
@@ -248,7 +259,9 @@ class TTOTester:
             # Impostiamo gli objective e lanciamo il TTO reale
             try:
                 self.tto.set_objective(seed, prompt, mask)
+                print("- Running TTO generation -")
                 result_img = self.tto.run(seed, mask)
+                print("- TTO generation completed -")
                 if mask is not None:
                     # se la mask ha un solo canale, espandila sui 3 canali dell'immagine
                     if mask.shape[1] == 1 and result_img.shape[1] == 3:
@@ -280,7 +293,6 @@ class TTOTester:
             loss = loss.mean()  # scalare
             clip_score = (-loss).item()  # CLIPScore vero: similarity img_final vs prompt
         return clip_score
-
 
 
 """
