@@ -16,6 +16,7 @@ from token_opt.tto.test_time_opt import (
                                         CLIPObjective,
                                         MultiObjective
                                     )
+from typing import cast
 
 
 def hard_clear_cuda(names=()):
@@ -266,6 +267,8 @@ class TTOTester:
 
     def evaluate_image_similarity(self, img:Tensor,prompt:str)->float:
         # 3) costruisci il CLIPObjective per la valutazione
+        # Use the executor's device (stored in the TTOExecuter instance)
+        assert self.tto is not None, "executor (TTOExecuter) missing"
         image_evaluator = CLIPObjective(
             prompt=prompt,
             cfg_scale=1.0,
@@ -321,8 +324,17 @@ class TTOExecuter:
         self.device=device
         self.objective: MultiObjective | None=None
         self.objectives_type=objectives_type
+        # Persistent heavy model (TestTimeOpt) - keep it alive across tests to avoid repeated reloading
+        # Annotate explicitly so static checkers know the expected type
+        self.tto: TestTimeOpt | None = None
         if len(self.config.objective_weights)!=len(self.objectives_type): #controllo che il numero di pesi sia uguale al numero di objective
             raise ValueError("The number of objective weights must be equal to the number of objectives")
+
+        # Create a single TestTimeOpt instance and keep it for the lifetime of the executor.
+        # We pass a dummy objective for initialization and will replace it in set_objective().
+        # Constructing the heavy model here avoids reloading it on every run.
+        # If construction fails, ensure the attribute exists as None so callers can detect it
+
 
     """
     ReconstructionObjective chiede: 
@@ -342,14 +354,14 @@ class TTOExecuter:
     """
     def set_objective(self, seed: Tensor, prompt: str, mask: Tensor):
         objectives_list=[]
-        for i,objective_type in enumerate(self.objectives_type): #scorro i tipi di objective che sono stati scelti
-            if objective_type==ObjectiveType.ReconstructionObjective and self.config.is_inpainting: #se e' un objective di ricostruzione e siamo in inpainting
-                if mask is None: #in questo caso DEVE esserci la maschera
+        for objective_type in self.objectives_type:
+            if objective_type==ObjectiveType.ReconstructionObjective and self.config.is_inpainting:
+                if mask is None:
                     raise ValueError("ReconstructionObjective requires a mask")
-                masked_img=seed*mask #immagine mascherata
-                recon_obj=ReconstructionObjective(masked_img,mask) #creo la ReconstructionObjective
-                objectives_list.append(recon_obj) #la aggiungo alla lista
-            elif objective_type==ObjectiveType.CLIPObjective: #se e' un objective di CLIP base
+                masked_img=seed*mask
+                recon_obj=ReconstructionObjective(masked_img,mask)
+                objectives_list.append(recon_obj)
+            elif objective_type==ObjectiveType.CLIPObjective:
                 clip_obj=CLIPObjective(
                     prompt=prompt,
                     neg_prompt="",
@@ -378,10 +390,57 @@ class TTOExecuter:
                 raise ValueError(f"Objective type {objective_type} not recognized")
         if len(objectives_list)!=len(self.config.objective_weights): #controllo che il numero di pesi sia uguale al numero di objective creati
             raise ValueError("The number of objective weights must be equal to the number of objectives")
+        # Assemble the MultiObjective and try to move module objects to the target device.
+        # Some objective-like objects (eg ReconstructionObjective) contain plain tensors and
+        # may not support `.to()`; handle that gracefully.
+        # Move Objective components to target device when possible, then create MultiObjective
+        for i, o in enumerate(objectives_list):
+            try:
+                objectives_list[i] = o.to(self.device)
+            except Exception:
+                # leave as-is; those objects may handle device placement in forward()
+                objectives_list[i] = o
+
+        # Create the MultiObjective instance using (possibly moved) submodules
+        self.objective = MultiObjective(objectives_list, self.config.objective_weights)
+        # Ensure that the MultiObjective container itself is on the target device (best-effort)
+        try:
+            self.objective = self.objective.to(self.device)
+        except Exception:
+            # if `.to()` fails, it likely contains non-module objects; forward() will handle device placement
+            pass
 
         """TENERE CONTO DELL'ORDINE DEI PESI RISPETTO AGLI OBJECTIVE"""
         self.objective=MultiObjective(objectives_list, self.config.objective_weights) #creo il MultiObjective con la lista di objective e i pesi corrispondenti
 
+        # Lazy-create the heavy TestTimeOpt model the first time we have an objective.
+        # Creation can fail (eg out-of-memory); surface the error but keep self.tto None
+        # so callers can retry or handle the situation.
+        if self.tto is None:
+            try:
+                # Create heavy TestTimeOpt once and move it to device
+                self.tto = TestTimeOpt(
+                    config=self.config.tto_config,
+                    objective=self.objective,
+                ).to(self.device)
+            except Exception:
+                # keep self.tto as None and re-raise so the caller sees the original error
+                raise
+        else:
+            # Assign the freshly built objective to the persistent tto instance
+            # Make sure the objective is placed on the same device as the tto before assignment
+            try:
+                self.objective = self.objective.to(self.device)
+            except Exception:
+                pass
+            # Assign - this will register the module inside the persistent TestTimeOpt
+            self.tto.objective = self.objective
+
+            # Best-effort: ensure the persistent model and its new submodules are consistent on device
+            try:
+                self.tto.to(self.device)
+            except Exception:
+                pass
 
     def run(self,seed:Tensor,mask:Tensor=None)->Tensor:
         if self.objective is None:
@@ -399,48 +458,105 @@ class TTOExecuter:
             tto_input = seed if self.config.seed_original else seed * mask
         else:
             tto_input = seed.to(self.device)
-        tto = TestTimeOpt(
-            config=self.config.tto_config,
-            objective=self.objective,
-        ).to(self.device)
+
         token_reset = None
         if self.config.is_inpainting:
             if self.config.enable_token_reset:
                 # Creiamo la masked image per il TokenResetter sullo stesso device
                 masked_for_reset = seed * mask
+                # assert to satisfy type-checkers: self.tto must exist here
+                assert self.tto is not None, "persistent TestTimeOpt instance missing"
                 token_reset = TokenResetter(
-                    titok=tto.titok,
+                    titok=cast(TestTimeOpt, self.tto).titok,
                     masked_img=masked_for_reset,
                     mask=mask,
                     reset_period=self.config.reset_period
                 )
+        # Sanity check: persistent tto must exist at this point
+        if self.tto is None:
+            raise RuntimeError("Internal error: persistent TestTimeOpt instance is missing. Ensure set_objective was called successfully.")
+
         try:
-            result_img = tto(
+            # Call the persistent TestTimeOpt instance
+            assert self.tto is not None
+            result_img = cast(TestTimeOpt, self.tto)(
                 seed=tto_input,
-                token_reset_callback=token_reset,)
+                token_reset_callback=token_reset)
         except Exception:
-            try:
-                del tto
-            except Exception:
-                pass
+            # do not delete the persistent tto; just free transient resources
             self.clean_after_test()
             hard_clear_cuda()
             raise
         else:
-            try:
-                del tto
-            except Exception:
-                pass
+            # keep the persistent tto alive for reuse; only free transient resources
             self.clean_after_test()
             hard_clear_cuda()
             return result_img.to("cpu")
 
     def clean_after_test(self):
+        """Liberiamo le risorse temporanee create durante il singolo test.
+
+        Nota: non cancelliamo `self.tto` (il modello pesante persistente) — lo teniamo vivo
+        per evitare costose ricostruzioni. Viene rimosso solo l'Objective temporaneo e forzata
+        la pulizia della cache CUDA.
+        """
         try:
-            del self.objective #elimino l'objective per liberare memoria
-        except Exception as e:
-            self.objective=None
-        self.objective=None
+            if hasattr(self, "objective"):
+                # rimuoviamo il riferimento all'oggetto objective per permettere il GC
+                del self.objective
+        except Exception:
+            pass
+        self.objective = None
+        # Rimuoviamo il riferimento all'objective anche dentro l'istanza persistente TestTimeOpt
+        try:
+            if self.tto is not None and hasattr(self.tto, "objective"):
+                try:
+                    delattr(self.tto, "objective")
+                except Exception:
+                    try:
+                        del self.tto.objective
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        # Forziamo il GC locale
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    # Metodi di utilità per debugging
+    def debug_state(self):
+        """Ritorna informazioni utili per il debug (tipo e device del tto)."""
+        info = {
+            "has_tto": self.tto is not None,
+            "tto_type": type(self.tto).__name__ if self.tto is not None else None,
+            "tto_device": "",
+            "objective_set": self.objective is not None,
+        }
+        if self.tto is not None:
+            try:
+                # proviamo a ottenere device dal primo parametro del modello
+                for p in self.tto.parameters():
+                    info["tto_device"] = str(p.device)
+                    break
+            except Exception:
+                info["tto_device"] = None
+        return info
+
+    def destroy_tto(self):
+        """Elimina l'istanza pesante di TestTimeOpt per liberare memoria GPU/CPU.
+
+        Usare quando si è sicuri di non dover più riutilizzare il modello (es. alla fine di una
+        sessione di test). Dopo questa chiamata, il TTO verrà ricreato al prossimo
+        `set_objective()` se necessario.
+        """
+        try:
+            if self.tto is not None:
+                # rimuoviamo riferimenti al modello e forziamo GC
+                del self.tto
+        except Exception:
+            pass
+        self.tto = None
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
