@@ -522,11 +522,11 @@ def main() -> None:
     print("======================\n")
 
     for cfg in configurations:
-        run_single_experiment(cfg, data_root=data_root, results_root=results_root)
+        run_configuration(cfg, data_root=data_root, results_root=results_root)
 
 
 
-def run_single_experiment(cfg: (str,Config,list[ObjectiveType]) , data_root: Path, results_root: Path) -> None:
+def run_configuration(cfg: (str, Config, list[ObjectiveType]), data_root: Path, results_root: Path) -> None:
 
     exp_name,conf,objective_types = cfg
 
