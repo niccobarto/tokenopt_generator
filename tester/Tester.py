@@ -1,6 +1,8 @@
 import enum
 from pathlib import Path
 import json
+import random
+
 import torch
 from torch import Tensor,nn
 import numpy as np
@@ -491,6 +493,13 @@ class TTOExecuter:
         try:
             # Call the persistent TestTimeOpt instance
             assert self.tto is not None
+
+            # seed PRIMA di ogni test
+            torch.manual_seed(0)
+            torch.cuda.manual_seed_all(0)
+            random.seed(0)
+            np.random.seed(0)
+
             result_img = cast(TestTimeOpt, self.tto)(
                 seed=tto_input,
                 token_reset_callback=token_reset)
