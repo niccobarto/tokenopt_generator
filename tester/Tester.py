@@ -16,6 +16,7 @@ from token_opt.tto.test_time_opt import (
                                         TestTimeOpt,
                                         TestTimeOptConfig,
                                         CLIPObjective,
+                                        SigLIPObjective,
                                         MultiObjective
                                     )
 from typing import cast
@@ -330,6 +331,7 @@ class ObjectiveType(enum.Enum):
     ReconstructionObjective=1
     CLIPObjective=2
     ComposedCLIP=3
+    ComposedSiglip=4
 
 class TTOExecuter:
 
@@ -378,7 +380,6 @@ class TTOExecuter:
             elif objective_type==ObjectiveType.CLIPObjective:
                 clip_obj=CLIPObjective(
                     prompt=prompt,
-                    neg_prompt="",
                     cfg_scale=self.config.cfg_scale,
                     num_augmentations=self.config.num_augmentations
                 ) #creo la CLIPObjective
@@ -386,7 +387,6 @@ class TTOExecuter:
             elif objective_type==ObjectiveType.ComposedCLIP and self.config.is_inpainting: #se e' un objective di ComposedCLIP e siamo in inpainting
                 base_clip_obj=CLIPObjective(
                     prompt=prompt,
-                    neg_prompt="",
                     cfg_scale=self.config.cfg_scale,
                     num_augmentations=self.config.num_augmentations
                 ) #creo la CLIPObjective di base
@@ -400,6 +400,22 @@ class TTOExecuter:
                     outside_grad=0.0
                 ) #creo la ComposedCLIP
                 objectives_list.append(composed_clip_obj)
+            elif objective_type==ObjectiveType.ComposedSiglip:
+                siglip_base=SigLIPObjective(
+                    prompt=prompt,
+                    num_augmentations=self.config.num_augmentations
+                ) #creo la SigLIPObjective
+
+                if mask is None:
+                    raise ValueError("ComposedSiglip requires a mask")
+                orig_img=seed if self.config.objective_seed_original else seed*mask
+                siglip_obj=ComposedCLIP(
+                    base_clip_obj=siglip_base,
+                    orig_img=orig_img,
+                    mask_bin=mask,
+                    outside_grad=0.0
+                ) #creo la ComposedCLIP con SigLIP come base
+                objectives_list.append(siglip_obj)
             else:
                 raise ValueError(f"Objective type {objective_type} not recognized")
         if len(objectives_list)!=len(self.config.objective_weights): #controllo che il numero di pesi sia uguale al numero di objective creati
