@@ -307,7 +307,7 @@ class TTOTester:
 
                     seed = orig_tns * mask_tns  # immagine mascherata (tensori in CPU)
                     # eseguo il test
-                    print(f"-- Executing inpainting test for obj: {obj["object"]} and mask: {test["mask_name"]} --")
+                    print(f"-- Executing inpainting test for obj: {obj['object']} and mask: {test['mask_name']} --")
                     test_results: list[tuple[Tensor, float, str, Tensor, Optional[tuple[Image.Image, Image.Image]]]] = self._execute_test(seed, prompts,
                                                                                           mask_tns)
                     # salvo la maschera usata
@@ -316,7 +316,7 @@ class TTOTester:
                 else:
                     # not inpainting
                     seed = orig_tns
-                    print(f"-- Executing not-inpainting test for obj: {obj["object"]} --")
+                    print(f"-- Executing not-inpainting test for obj: {obj['object']} --")
                     # eseguo il test
                     test_results: list[tuple[Tensor, float, str, Tensor, Optional[tuple[Image.Image, Image.Image]]]] = self._execute_test(seed,
                                                                                           prompts)
