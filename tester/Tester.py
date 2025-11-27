@@ -4,6 +4,7 @@ import json
 import random
 
 import torch
+from jaxtyping import Float
 from torch import Tensor,nn
 import numpy as np
 import torchvision.transforms.v2.functional as tvf
@@ -16,11 +17,128 @@ from token_opt.tto.test_time_opt import (
                                         TestTimeOpt,
                                         TestTimeOptConfig,
                                         CLIPObjective,
-                                        SigLIPObjective,
-                                        MultiObjective
-                                    )
-from typing import cast
+                                        SigLIPObjective)
+from typing import cast, Optional
+import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+import io
 
+class LossPlotter:
+    """
+    Plotter pensato per un singolo test.
+    - Creare una nuova istanza o chiamare `.reset()` quando si inizia un nuovo test.
+    - add_values(values, weights=None): registra le loss di un prompt.
+    - generate_plot(): ritorna due PIL.Image (raw, weighted).
+    - save_plots(dir_path, prefix): salva le due immagini su disco.
+    """
+    def __init__(self, objective_names: list[str]):
+        self.objective_names = list(objective_names)
+        self.num_loss = len(self.objective_names)
+        self.per_obj: list[list[float]] = [[] for _ in range(self.num_loss)]
+        self.per_obj_weighted: list[list[float]] = [[] for _ in range(self.num_loss)]
+        self.totals: list[float] = []
+        self.totals_weighted: list[float] = []
+        self.weights_history: list[list[float]] = []
+
+    def add_values(self, values: list[float], weights: Optional[list[float]] = None):
+        if len(values) != self.num_loss:
+            raise ValueError("values length must match number of objectives")
+        if weights is None:
+            weights = [1.0] * self.num_loss
+        if len(weights) != self.num_loss:
+            raise ValueError("weights length must match number of objectives")
+
+        for i, v in enumerate(values):
+            self.per_obj[i].append(float(v))
+            self.per_obj_weighted[i].append(float(v) * float(weights[i]))
+
+        self.totals.append(float(sum(values)))
+        self.totals_weighted.append(float(sum(v * w for v, w in zip(values, weights))))
+        self.weights_history.append([float(w) for w in weights])
+
+    def reset(self):
+        """Svuota lo storico: chiamare all'inizio di ogni nuovo test."""
+        self.per_obj = [[] for _ in range(self.num_loss)]
+        self.per_obj_weighted = [[] for _ in range(self.num_loss)]
+        self.totals = []
+        self.totals_weighted = []
+        self.weights_history = []
+
+    def _fig_to_image(self, fig: Figure) -> Image.Image:
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight")
+        buf.seek(0)
+        img = Image.open(buf).convert("RGB")
+        buf.close()
+        plt.close(fig)
+        return img
+
+    def generate_plot(self, figsize=(10, 4)) -> tuple[Image.Image, Image.Image]:
+        """Genera e restituisce (img_raw, img_weighted) per l'attuale storico (singolo test)."""
+        steps = list(range(1, len(self.totals) + 1))
+
+        # Raw plot
+        fig1, ax1 = plt.subplots(figsize=figsize)
+        for i, name in enumerate(self.objective_names):
+            ax1.plot(steps, self.per_obj[i], label=name, linewidth=1)
+        if self.totals:
+            ax1.plot(steps, self.totals, label="total (raw)", color="black", linewidth=2)
+        ax1.set_xlabel("step")
+        ax1.set_ylabel("loss")
+        ax1.set_title("Loss per objective (raw) + total")
+        ax1.legend(loc="best", fontsize="small")
+        img_raw = self._fig_to_image(fig1)
+
+        # Weighted plot
+        fig2, ax2 = plt.subplots(figsize=figsize)
+        last_weights = self.weights_history[-1] if self.weights_history else [1.0] * self.num_loss
+        for i, name in enumerate(self.objective_names):
+            label = f"{name} (w={last_weights[i]:.2f})"
+            ax2.plot(steps, self.per_obj_weighted[i], label=label, linewidth=1)
+        if self.totals_weighted:
+            ax2.plot(steps, self.totals_weighted, label="total (weighted)", color="black", linewidth=2)
+        ax2.set_xlabel("step")
+        ax2.set_ylabel("loss")
+        ax2.set_title("Loss per objective (weighted) + total")
+        ax2.legend(loc="best", fontsize="small")
+        img_weighted = self._fig_to_image(fig2)
+
+        return img_raw, img_weighted
+
+    def save_plots(self, out_raw_path, out_weighted_path):
+        """Genera e salva i plot direttamente su disco."""
+        img_raw, img_weighted = self.generate_plot()
+        img_raw.save(out_raw_path)
+        img_weighted.save(out_weighted_path)
+
+# Rende l'istanza globale accessibile ovunque nel modulo
+loss_plotter_global: LossPlotter | None = None
+
+class MultiObjective(nn.Module):
+    def __init__(self, objectives: list[nn.Module], weights: list[float]):
+        super().__init__()
+        self.weights = weights
+        self.objectives = nn.ModuleList(objectives)
+
+    def forward(self, img: Float[Tensor, "b c h w"]) -> Float[Tensor, "b"]:
+        # Calcola le loss per ogni objective e registra i valori nel plotter globale
+        losses_per_obj: list[Tensor] = []  # ciascuna [B]
+        loss = torch.zeros_like(img[:, 0, 0, 0])
+        for w, o in zip(self.weights, self.objectives):
+            li = o(img)  # [B]
+            losses_per_obj.append(li)
+            loss = loss + w * li
+
+        # Registra (una volta per forward) le loss nel plotter globale
+        try:
+            global loss_plotter_global
+            if loss_plotter_global is not None:
+                # convertiamo a float per ogni objective, aggregando sul batch (mean)
+                values = [float(li.detach().mean().item()) for li in losses_per_obj]
+                loss_plotter_global.add_values(values=values, weights=[float(w) for w in self.weights])
+        except Exception:
+            pass
+        return loss
 
 def hard_clear_cuda(names=()):
     """Elimina variabili globali indicate e forza la pulizia della memoria GPU/CPU.
@@ -190,7 +308,7 @@ class TTOTester:
                     seed = orig_tns * mask_tns  # immagine mascherata (tensori in CPU)
                     # eseguo il test
                     print(f"-- Executing inpainting test for obj: {obj["object"]} and mask: {test["mask_name"]} --")
-                    test_results: list[tuple[Tensor, float, str, Tensor]] = self._execute_test(seed, prompts,
+                    test_results: list[tuple[Tensor, float, str, Tensor, Optional[tuple[Image.Image, Image.Image]]]] = self._execute_test(seed, prompts,
                                                                                           mask_tns)
                     # salvo la maschera usata
                     mask = tensor_to_image(mask_tns,True)
@@ -200,12 +318,12 @@ class TTOTester:
                     seed = orig_tns
                     print(f"-- Executing not-inpainting test for obj: {obj["object"]} --")
                     # eseguo il test
-                    test_results: list[tuple[Tensor, float, str, Tensor]] = self._execute_test(seed,
+                    test_results: list[tuple[Tensor, float, str, Tensor, Optional[tuple[Image.Image, Image.Image]]]] = self._execute_test(seed,
                                                                                           prompts)
                 out_tests = []
                 prompt_number = 1
                 # salvo i risultati del singolo test
-                for result_img_tensor, clip_score, prompt, seed in test_results:
+                for result_img_tensor, clip_score, prompt, seed, plots in test_results:
 
                     result_img = tensor_to_image(result_img_tensor)  # converto il tensore risultato in immagine
                     seed_img = tensor_to_image(
@@ -225,6 +343,13 @@ class TTOTester:
                     # Salviamo l'immagine singola con estensione .png
                     result_img.save(not_merged_dir / Path(f"prompt_{prompt_number}.png"))
 
+                    if plots is not None:
+                        raw_plot, weighted_plot = plots
+                        # Salviamo i plots nella sottocartella 'plots' del test, con nomi richiesti
+                        plots_dir = result_dir_path / Path("plots")
+                        plots_dir.mkdir(parents=True, exist_ok=True)
+                        raw_plot.save(plots_dir / Path(f"prompt_{prompt_number}.png"))
+                        weighted_plot.save(plots_dir / Path(f"prompt_{prompt_number}_weights.png"))
                     out_single_test_json = {
                         "prompt_number": prompt_number,
                         "prompt": prompt,
@@ -256,7 +381,7 @@ class TTOTester:
             output_cases.append(output_case)
         return output_cases
 
-    def _execute_test(self, seed: Tensor, prompts: list[str], mask: Tensor=None) -> list[tuple[Tensor, float, str, Tensor]]:
+    def _execute_test(self, seed: Tensor, prompts: list[str], mask: Tensor=None) -> list[tuple[Tensor, float, str, Tensor, Optional[tuple[Image.Image, Image.Image]]]]:
          results_combined=[]
          for prompt in prompts:
             # Impostiamo gli objective e lanciamo il TTO reale
@@ -274,11 +399,16 @@ class TTOTester:
 
                     result_img = result_img * (1 - mask_eval) + seed * mask_eval  # ricomponiamo l'immagine finale con il seed nelle aree mascherate
                 similarity=self.evaluate_image_similarity(result_img,prompt)
+                # Genera i plot del singolo test (storico corrente) se il plotter è disponibile
+                global loss_plotter_global
+                plots: Optional[tuple[Image.Image, Image.Image]] = None
+                if loss_plotter_global is not None:
+                    plots = loss_plotter_global.generate_plot()
             except Exception as e:
                 # se fallisce l'esecuzione, includiamo comunque un placeholder nel risultato
                 # e rialziamo l'eccezione dopo aver liberato risorse (la run già pulisce internamente)
                 raise
-            results_combined.append((result_img, similarity, prompt, seed))
+            results_combined.append((result_img, similarity, prompt, seed,plots))
          return results_combined
 
     def evaluate_image_similarity(self, img:Tensor,prompt:str)->float:
@@ -345,6 +475,13 @@ class TTOExecuter:
         self.tto: TestTimeOpt | None = None
         if len(self.config.objective_weights)!=len(self.objectives_type): #controllo che il numero di pesi sia uguale al numero di objective
             raise ValueError("The number of objective weights must be equal to the number of objectives")
+        names = []
+        for obj in self.objectives_type:
+            names.append(obj.name)
+
+        # Inizializza davvero l'istanza globale del plotter con i nomi degli obiettivi
+        global loss_plotter_global
+        loss_plotter_global = LossPlotter(names)
 
         # Create a single TestTimeOpt instance and keep it for the lifetime of the executor.
         # We pass a dummy objective for initialization and will replace it in set_objective().
@@ -369,6 +506,10 @@ class TTOExecuter:
     -la maschera
     """
     def set_objective(self, seed: Tensor, prompt: str, mask: Tensor):
+        # Reset del plotter a inizio test singolo, così accumula solo i valori del test corrente
+        global loss_plotter_global
+        if loss_plotter_global is not None:
+            loss_plotter_global.reset()
         objectives_list=[]
         for objective_type in self.objectives_type:
             if objective_type==ObjectiveType.ReconstructionObjective and self.config.is_inpainting:
