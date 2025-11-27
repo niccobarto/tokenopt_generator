@@ -746,6 +746,8 @@ class TTOExecuter:
             "cfg_scale":self.config.cfg_scale,
             "num_augmentations":self.config.num_augmentations,
             "is_inpainting":self.config.is_inpainting,
+            "enable_token_reset":self.config.enable_token_reset,
+            "reset_period":self.config.reset_period,
             "seed_original":self.config.seed_original,
             "objective_seed_original":self.config.objective_seed_original,
             "objectives_type":[obj_type.name for obj_type in self.objectives_type]
