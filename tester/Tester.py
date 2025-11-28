@@ -74,7 +74,9 @@ class LossPlotter:
         return img
 
     def generate_plot(self, figsize=(10, 4)) -> tuple[Image.Image, Image.Image]:
-        """Genera e restituisce (img_raw, img_weighted) per l'attuale storico (singolo test)."""
+        """Genera e restituisce (img_raw, img_weighted) per l'attuale storico (singolo test).
+        Nel plot pesato vengono mostrati anche (in tratteggio) i valori raw per confronto.
+        """
         steps = list(range(1, len(self.totals) + 1))
 
         # Raw plot
@@ -93,13 +95,27 @@ class LossPlotter:
         fig2, ax2 = plt.subplots(figsize=figsize)
         last_weights = self.weights_history[-1] if self.weights_history else [1.0] * self.num_loss
         for i, name in enumerate(self.objective_names):
-            label = f"{name} (w={last_weights[i]:.2f})"
-            ax2.plot(steps, self.per_obj_weighted[i], label=label, linewidth=1)
+            # curve pesata
+            label_w = f"{name} (w={last_weights[i]:.2f})"
+            ax2.plot(steps, self.per_obj_weighted[i], label=label_w, linewidth=1)
+            # overlay raw per confronto visivo se ci sono valori
+            ax2.plot(steps, self.per_obj[i], linestyle="--", alpha=0.3, linewidth=1)
         if self.totals_weighted:
             ax2.plot(steps, self.totals_weighted, label="total (weighted)", color="black", linewidth=2)
         ax2.set_xlabel("step")
-        ax2.set_ylabel("loss")
-        ax2.set_title("Loss per objective (weighted) + total")
+        ax2.set_ylabel("loss (weighted)")
+        ax2.set_title("Loss pesata per objective + total (raw tratteggiato)")
+
+        # Mantieni lo stesso range y del plot raw per evidenziare la scala
+        try:
+            raw_values_all = [v for series in self.per_obj for v in series]
+            if raw_values_all:
+                y_min = min(raw_values_all)
+                y_max = max(raw_values_all)
+                if y_min != y_max:
+                    ax2.set_ylim(y_min, y_max)
+        except Exception:
+            pass
         ax2.legend(loc="best", fontsize="small")
         img_weighted = self._fig_to_image(fig2)
 
