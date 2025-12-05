@@ -467,10 +467,11 @@ class Config:
     cfg_scale:float
     num_augmentations:int
     is_inpainting:bool
+    two_phase_generation:bool=False
     seed_original:bool=False #se True si passa l'immagine originale al tto, altrimenti immagine mascherata
     objective_seed_original:bool=False #se True si passa l'immagine originale al CLIPObjective, altrimenti immagine mascherata
     enable_token_reset:bool=True
-    reset_period:int=5 if enable_token_reset else None
+    reset_period:int=5 if enable_token_reset else None,
 
 
 class ObjectiveType(enum.Enum):
@@ -516,6 +517,8 @@ class TTOExecuter:
     -cfg_scale
     -num-augumentations
 
+
+    
     ComposedCLIP chiede:
     -CLIPObjective (quindi tutti i suoi parametri)
     -l'immagine originale/mascherata
@@ -673,9 +676,25 @@ class TTOExecuter:
             random.seed(0)
             np.random.seed(0)
 
-            result_img = cast(TestTimeOpt, self.tto)(
-                seed=tto_input,
-                token_reset_callback=token_reset)
+            if not self.config.two_phase_generation:
+                result_img = cast(TestTimeOpt, self.tto)(
+                    seed=tto_input,
+                    token_reset_callback=token_reset)
+            else:#GENERAZIONE IN DUE FASI
+                clip_weight=self.config.objective_weights[1]
+                self.objective.weights[1]=0.0 #disabilito temporaneamente il peso di CLIPObjective
+                steps=self.config.tto_config.num_iter
+                self.tto.config.num_iter=201 #prima fase 200 step
+                result_img = cast(TestTimeOpt, self.tto)(
+                    seed=tto_input,
+                    token_reset_callback=token_reset)
+
+                self.objective.weights[1]=clip_weight #riabilito il peso di CLIP
+                self.tto.config.num_iter=steps #ripristino il numero di step originale
+                result_img = cast(TestTimeOpt, self.tto)(
+                    seed=result_img,
+                    token_reset_callback=token_reset)
+
         except Exception:
             # do not delete the persistent tto; just free transient resources
             self.clean_after_test()
