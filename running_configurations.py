@@ -1,4 +1,4 @@
-from typing import Dict, Any
+rom typing import Dict, Any
 
 from tester.Tester import (TTOTester,
                            TTOExecuter,
