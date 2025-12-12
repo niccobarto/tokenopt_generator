@@ -1,6 +1,6 @@
-from tto.ema import EMAModel
-from tto.siglip import SigLIP
-from tto.vqgan_wrapper import PretrainedVQGAN
+from tokenopt_generator.token_opt.tto.ema import EMAModel
+from tokenopt_generator.token_opt.tto.siglip import SigLIP
+from tokenopt_generator.token_opt.tto.vqgan_wrapper import PretrainedVQGAN
 
 from typing import cast, Callable, Literal
 from dataclasses import dataclass
@@ -14,8 +14,8 @@ from einops import rearrange, einsum
 from jaxtyping import Float
 import open_clip
 
-from titok.modeling.quantizer import DiagonalGaussianDistribution
-from titok.modeling.titok import TiTok
+from tokenopt_generator.token_opt.titok.modeling.quantizer import DiagonalGaussianDistribution
+from tokenopt_generator.token_opt.titok.modeling.titok import TiTok
 
 
 @dataclass

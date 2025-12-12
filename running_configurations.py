@@ -1,10 +1,10 @@
-rom typing import Dict, Any
+from typing import Dict, Any
 
 from tester.Tester import (TTOTester,
                            TTOExecuter,
                            Config,
-                           ObjectiveType,
                            )
+from inpaiting_utils.inpainting import ObjectiveType
 import enum
 from pathlib import Path
 import json
@@ -485,7 +485,7 @@ def main() -> None:
     # ============================================================
 
     add_conf(
-        name="C4_CLIPONLY_RESET10",
+        name="C9CLIPONLYSTRONG_RESET",
         tto_params=dict(
             num_iter=351,
             ema_decay=0.98,

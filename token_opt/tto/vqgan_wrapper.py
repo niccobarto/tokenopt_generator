@@ -7,7 +7,7 @@ from torch import nn, Tensor
 from einops import rearrange
 from huggingface_hub import hf_hub_download
 
-from titok.modeling.titok import PretrainedTokenizer
+from tokenopt_generator.token_opt.titok.modeling.titok import PretrainedTokenizer
 
 
 class PretrainedVQGAN(nn.Module):

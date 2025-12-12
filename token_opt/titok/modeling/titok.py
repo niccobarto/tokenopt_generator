@@ -19,12 +19,12 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 
-from titok.modeling.modules.base_model import BaseModel
-from titok.modeling.modules.blocks import TiTokEncoder, TiTokDecoder
-from titok.modeling.quantizer.quantizer import VectorQuantizer, DiagonalGaussianDistribution
-from titok.modeling.modules.maskgit_vqgan import Encoder as Pixel_Eecoder
-from titok.modeling.modules.maskgit_vqgan import Decoder as Pixel_Decoder
-from titok.modeling.modules.maskgit_vqgan import VectorQuantizer as Pixel_Quantizer
+from tokenopt_generator.token_opt.titok.modeling.modules.base_model import BaseModel
+from tokenopt_generator.token_opt.titok.modeling.modules.blocks import TiTokEncoder, TiTokDecoder
+from tokenopt_generator.token_opt.titok.modeling.quantizer.quantizer import VectorQuantizer, DiagonalGaussianDistribution
+from tokenopt_generator.token_opt.titok.modeling.modules.maskgit_vqgan import Encoder as Pixel_Eecoder
+from tokenopt_generator.token_opt.titok.modeling.modules.maskgit_vqgan import Decoder as Pixel_Decoder
+from tokenopt_generator.token_opt.titok.modeling.modules.maskgit_vqgan import VectorQuantizer as Pixel_Quantizer
 import json
 from omegaconf import OmegaConf
 from pathlib import Path
